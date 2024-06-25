@@ -1,0 +1,408 @@
+const { rw_bottom, rw_top } =  require('./rolling_windows.js')
+
+class HSPattern {
+    constructor(
+        inverted,
+        l_shoulder = -1,
+        r_shoulder = -1,
+        l_armpit = -1,
+        r_armpit = -1,
+        head = -1,
+        l_shoulder_p = -1,
+        r_shoulder_p = -1,
+        l_armpit_p = -1,
+        r_armpit_p = -1,
+        head_p = -1,
+        start_i = -1,
+        break_i = -1,
+        break_p = -1,
+        neck_start = -1,
+        neck_end = -1,
+        neck_slope = -1,
+        head_width = -1,
+        head_height = -1,
+        pattern_r2 = -1
+    ) {
+        this.inverted = inverted;
+        this.l_shoulder = l_shoulder;
+        this.r_shoulder = r_shoulder;
+        this.l_armpit = l_armpit;
+        this.r_armpit = r_armpit;
+        this.head = head;
+        this.l_shoulder_p = l_shoulder_p;
+        this.r_shoulder_p = r_shoulder_p;
+        this.l_armpit_p = l_armpit_p;
+        this.r_armpit_p = r_armpit_p;
+        this.head_p = head_p;
+        this.start_i = start_i;
+        this.break_i = break_i;
+        this.break_p = break_p;
+        this.neck_start = neck_start;
+        this.neck_end = neck_end;
+        this.neck_slope = neck_slope;
+        this.head_width = head_width;
+        this.head_height = head_height;
+        this.pattern_r2 = pattern_r2;
+    }
+
+    to_dict() {
+        return {
+            "inverted": this.inverted,
+            "l_shoulder": this.l_shoulder,
+            "r_shoulder": this.r_shoulder,
+            "l_armpit": this.l_armpit,
+            "r_armpit": this.r_armpit,
+            "head": this.head,
+            "l_shoulder_p": this.l_shoulder_p,
+            "r_shoulder_p": this.r_shoulder_p,
+            "l_armpit_p": this.l_armpit_p,
+            "r_armpit_p": this.r_armpit_p,
+            "head_p": this.head_p,
+            "start_i": this.start_i,
+            "break_i": this.break_i,
+            "break_p": this.break_p,
+            "neck_start": this.neck_start,
+            "neck_end": this.neck_end,
+            "neck_slope": this.neck_slope,
+            "head_width": this.head_width,
+            "head_height": this.head_height,
+            "pattern_r2": this.pattern_r2
+        };
+    }
+}
+
+async function check_hs_pattern(extrema_indices, data, i, early_find = false) {
+    let l_shoulder = extrema_indices[0];
+    let l_armpit = extrema_indices[1];
+    let head = extrema_indices[2];
+    let r_armpit = extrema_indices[3];
+
+    // console.log(l_shoulder,l_armpit,head,r_armpit);
+
+    if (i - r_armpit < 2)
+        return null;
+
+    let r_shoulder = r_armpit + data.slice(r_armpit + 1, i).reduce((acc, val, idx) => val > data[r_armpit + acc] ? idx + 1 : acc, 0) ;
+    // console.log('R shoulder &&&&', r_shoulder)
+
+    if (data[head] <= Math.max(data[l_shoulder], data[r_shoulder]))
+        return null;
+
+    let r_midpoint = 0.5 * (data[r_shoulder] + data[r_armpit]);
+    let l_midpoint = 0.5 * (data[l_shoulder] + data[l_armpit]);
+
+    if (data[l_shoulder] < r_midpoint || data[r_shoulder] < l_midpoint)
+        return null;
+
+    let r_to_h_time = r_shoulder - head;
+    let l_to_h_time = head - l_shoulder;
+
+    if (r_to_h_time > 2.5 * l_to_h_time || l_to_h_time > 2.5 * r_to_h_time)
+        return null;
+
+    let neck_run = r_armpit - l_armpit;
+    let neck_rise = data[r_armpit] - data[l_armpit];
+    let neck_slope = neck_rise / neck_run;
+    let neck_val = data[l_armpit] + (i - l_armpit) * neck_slope;
+
+    if (early_find) {
+        if (data[i] > r_midpoint)
+            return null;
+    } else {
+        if (data[i] > neck_val)
+            return null;
+    }
+
+    let head_width = r_armpit - l_armpit;
+    let pat_start = -1;
+    let neck_start = -1;
+
+    for (let j = 1; j < head_width; j++) {
+        let neck = data[l_armpit] + (l_shoulder - l_armpit - j) * neck_slope;
+
+        if (l_shoulder - j < 0)
+            return null;
+
+        if (data[l_shoulder - j] < neck) {
+            pat_start = l_shoulder - j;
+            neck_start = neck;
+            break;
+        }
+    }
+
+    if (pat_start === -1)
+        return null;
+
+    let pat = new HSPattern(false);
+    pat.l_shoulder = l_shoulder;
+    pat.r_shoulder = r_shoulder;
+    pat.l_armpit = l_armpit;
+    pat.r_armpit = r_armpit;
+    pat.head = head;
+    pat.l_shoulder_p = data[l_shoulder];
+    pat.r_shoulder_p = data[r_shoulder];
+    pat.l_armpit_p = data[l_armpit];
+    pat.r_armpit_p = data[r_armpit];
+    pat.head_p = data[head];
+    pat.start_i = pat_start;
+    pat.break_i = i;
+    pat.break_p = data[i];
+
+    if (2 * Math.abs(pat.break_p - pat.r_shoulder_p) < Math.abs(pat.r_shoulder_p - pat.r_armpit_p))
+        return null;
+
+    pat.neck_start = neck_start;
+    pat.neck_end = neck_val;
+    pat.neck_slope = neck_slope;
+    pat.head_width = head_width;
+    pat.head_height = data[head] - (data[l_armpit] + (head - l_armpit) * neck_slope);
+
+    // console.log('HS pattern Found',pat)
+    return pat;
+}
+
+async function check_ihs_pattern(extrema_indices, data, i, early_find = false) {
+    let l_shoulder = extrema_indices[0];
+    let l_armpit = extrema_indices[1];
+    let head = extrema_indices[2];
+    let r_armpit = extrema_indices[3];
+
+    // console.log(l_shoulder,l_armpit,head,r_armpit);
+
+    if (i - r_armpit < 2)
+        return null;
+
+    let r_shoulder = r_armpit + data.slice(r_armpit + 1, i).reduce((acc, val, idx) => val < data[r_armpit + acc] ? idx + 1 : acc, 0);
+    // console.log(r_shoulder)
+    if (data[head] >= Math.min(data[l_shoulder], data[r_shoulder]))
+        return null;
+
+    let r_midpoint = 0.5 * (data[r_shoulder] + data[r_armpit]);
+    let l_midpoint = 0.5 * (data[l_shoulder] + data[l_armpit]);
+
+    if (data[l_shoulder] > r_midpoint || data[r_shoulder] > l_midpoint)
+        return null;
+
+    let r_to_h_time = r_shoulder - head;
+    let l_to_h_time = head - l_shoulder;
+
+    if (r_to_h_time > 2.5 * l_to_h_time || l_to_h_time > 2.5 * r_to_h_time ){
+        return null;
+    } 
+
+    let neck_run = r_armpit - l_armpit;
+    let neck_rise = data[r_armpit] - data[l_armpit];
+    let neck_slope = neck_rise / neck_run;
+    let neck_val = data[l_armpit] + (i - l_armpit) * neck_slope;
+
+    if (early_find) {
+        if (data[i] < r_midpoint)
+            return null;
+    } else {
+        if (data[i] < neck_val)
+            return null;
+    }
+
+    let head_width = r_armpit - l_armpit;
+    let pat_start = -1;
+    let neck_start = -1;
+
+    for (let j = 1; j < head_width; j++) {
+        let neck = data[l_armpit] + (l_shoulder - l_armpit - j) * neck_slope;
+
+        if (l_shoulder - j < 0)
+            return null;
+
+        if (data[l_shoulder - j] > neck) {
+            pat_start = l_shoulder - j;
+            neck_start = neck;
+            break;
+        }
+    }
+
+    if (pat_start === -1)
+        return null;
+
+    let pat = new HSPattern(true);
+    pat.l_shoulder = l_shoulder;
+    pat.r_shoulder = r_shoulder;
+    pat.l_armpit = l_armpit;
+    pat.r_armpit = r_armpit;
+    pat.head = head;
+    pat.l_shoulder_p = data[l_shoulder];
+    pat.r_shoulder_p = data[r_shoulder];
+    pat.l_armpit_p = data[l_armpit];
+    pat.r_armpit_p = data[r_armpit];
+    pat.head_p = data[head];
+
+    pat.start_i = pat_start;
+    pat.break_i = i;
+    pat.break_p = data[i];
+
+    if (2 * Math.abs(pat.break_p - pat.r_shoulder_p) < Math.abs(pat.r_shoulder_p - pat.r_armpit_p))
+        return null;
+
+    pat.neck_start = neck_start;
+    pat.neck_end = neck_val;
+
+    pat.neck_slope = neck_slope;
+    pat.head_width = head_width;
+    pat.head_height = (data[l_armpit] + (head - l_armpit) * neck_slope) - data[head];
+    return pat;
+}
+
+async function get_pattern_return(data, pat, log_prices = true) {
+    // console.log(' Get pattern ')
+    let entry_price = pat.break_p;
+    let entry_i = pat.break_i;
+    let stop_price = pat.r_shoulder_p;
+    let tp_price;
+
+    if (pat.inverted)
+        tp_price = pat.neck_end + pat.head_height;
+    else
+        tp_price = pat.neck_end - pat.head_height;
+
+    let exit_price = -1;
+
+    for (let i = 0; i < pat.head_width; i++) {
+        if (entry_i + i >= data.length)
+            return NaN;
+
+        exit_price = data[entry_i + i];
+
+        if (pat.inverted && (exit_price > tp_price || exit_price < stop_price))
+            break;
+
+        if (!pat.inverted && (exit_price < tp_price || exit_price > stop_price))
+            break;
+    }
+
+    if (pat.inverted) {
+        if (log_prices)
+            return exit_price - entry_price;
+        else
+            return (exit_price - entry_price) / entry_price;
+    } else {
+        if (log_prices)
+            return entry_price - exit_price;
+        else
+            return -1 * (exit_price - entry_price) / entry_price;
+    }
+}
+
+async function find_hs_patterns(data, order, early_find = false) {
+    // console.log('find HS pattern function is called')
+    if (order < 1)
+        throw new Error("Order must be greater than or equal to 1.");
+
+    let last_is_top = false;
+    let recent_extrema = [];
+    let recent_types = [];
+    let hs_lock = false;
+    let ihs_lock = false;
+    let ihs_patterns = [];
+    let hs_patterns = [];
+
+    for (let i = 0; i < data.length; i++) {
+        if (rw_top(data, i, order)) {
+            if ( recent_extrema.length == 5){
+                recent_extrema.shift();
+                recent_types.shift();
+            }
+            recent_extrema.push(i - order);
+            recent_types.push(1);
+            ihs_lock = false;
+            last_is_top = true;
+            // console.log('Top point found')
+        }
+
+        if (rw_bottom(data, i, order)) {
+            if ( recent_extrema.length == 5){
+                recent_extrema.shift();
+                recent_types.shift();
+            }
+            recent_extrema.push(i - order);
+            recent_types.push(-1);
+            hs_lock = false;
+            last_is_top = false;
+            // console.log('Bottom Point found ')
+        }
+
+        if (recent_extrema.length < 5)
+            continue;
+
+        // console.log('Current index is : ' , i );
+        // console.log(recent_extrema);
+        
+        let hs_alternating = true;
+        let ihs_alternating = true;
+
+        if (last_is_top) {
+            for (let j = 2; j < 5; j++) {
+                if (recent_types[j] === recent_types[j - 1]) {
+                    ihs_alternating = false;
+                    // break;
+                }
+            }
+
+            for (let j = 1; j < 4; j++) {
+                if (recent_types[j] === recent_types[j - 1]) {
+                    hs_alternating = false;
+                    // break;
+                }
+            }
+
+            ihs_extrema = recent_extrema.slice(1, 5);
+            hs_extrema = recent_extrema.slice(0, 4);
+        } else {
+            for (let j = 2; j < 5; j++) {
+                if (recent_types[j] === recent_types[j - 1]) {
+                    hs_alternating = false;
+                    // break;
+                }
+            }
+
+            for (let j = 1; j < 4; j++) {
+                if (recent_types[j] === recent_types[j - 1]) {
+                    ihs_alternating = false;
+                    // break;
+                }
+            }
+
+            ihs_extrema = recent_extrema.slice(0, 4);
+            hs_extrema = recent_extrema.slice(1, 5);
+        }
+
+        if (ihs_lock || !ihs_alternating)
+            ihs_pat = null;
+        else{
+            ihs_pat = await check_ihs_pattern(ihs_extrema, data, i, early_find);
+            // console.log('IHS Pattern found ** ',ihs_pat)
+        }
+
+        if (hs_lock || !hs_alternating)
+            hs_pat = null;
+        else{
+            hs_pat = await check_hs_pattern(hs_extrema, data, i, early_find);
+            // console.log('HS Pattern found ** ',hs_pat)
+        }
+
+      
+
+        if (hs_pat !== null) {
+            hs_lock = true;
+            hs_patterns.push(hs_pat.to_dict());
+            // console.log('hs Pattern Found', hs_pat.to_dict())
+        }
+
+        if (ihs_pat !== null) {
+            ihs_lock = true;
+            ihs_patterns.push(ihs_pat.to_dict());
+            // console.log('IHS pattern Found',ihs_pat.to_dict())
+        }
+    }
+    return [hs_patterns, ihs_patterns];
+}
+
+module.exports = {find_hs_patterns};
